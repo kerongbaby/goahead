@@ -740,7 +740,7 @@ installBinary: $(DEPS_42)
 	mkdir -p "$(ME_VAPP_PREFIX)/bin" ; \
 	cp $(BUILD)/bin/roots.crt $(ME_VAPP_PREFIX)/bin/roots.crt ; \
 	mkdir -p "$(ME_ETC_PREFIX)" ; \
-	cp $(BUILD)/bin/self.* $(ME_ETC_PREFIX)/self.* ; \
+	cp $(BUILD)/bin/self.* $(ME_ETC_PREFIX)/ ; \
 	mkdir -p "$(ME_WEB_PREFIX)" ; \
 	cp src/web/index.html $(ME_WEB_PREFIX)/index.html ; \
 	cp src/web/favicon.ico $(ME_WEB_PREFIX)/favicon.ico ; \
