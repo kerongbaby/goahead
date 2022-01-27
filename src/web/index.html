@@ -2,6 +2,34 @@
 <html lang="en">
 <head>
 <title>Home Page</title>
+<script type="text/javascript">
+    function wsOnline() {
+        const ws = new WebSocket("ws://" + window.location.host + "/websocket");
+        ws.onopen = e => {
+            console.log(`WebSocket onopen state: ${ws.readyState}`)
+        }
+
+        ws.onerror = e => {
+            if(null == e)
+                console.log("WebSocket error with " + e);
+            else
+                console.log("WebSocket error without message");
+        }
+
+        ws.onmessage = data => {
+            console.log("WebSocket have message")
+        }
+
+        ws.onclose = data => {
+            console.log("WebSocket onclose closed")
+            console.log(data);
+        }
+    }
+
+    window.onload=function(){
+        wsOnline();
+    }
+</script>
 </head>
 
 <body>

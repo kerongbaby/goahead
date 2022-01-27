@@ -108,6 +108,7 @@ prep:
 	@echo "$(MAKEFLAGS)" >$(BUILD)/.makeflags
 
 clean:
+	rm -f "$(BUILD)/obj/ws.o"
 	rm -f "$(BUILD)/obj/action.o"
 	rm -f "$(BUILD)/obj/alloc.o"
 	rm -f "$(BUILD)/obj/auth.o"
@@ -203,6 +204,16 @@ $(BUILD)/inc/mbedtls.h: $(DEPS_6)
 	@echo '      [Copy] $(BUILD)/inc/mbedtls.h'
 	mkdir -p "$(BUILD)/inc"
 	cp src/mbedtls/mbedtls.h $(BUILD)/inc/mbedtls.h
+
+#
+#   ws.o
+#
+DEPS_WS += $(BUILD)/inc/goahead.h
+
+$(BUILD)/obj/ws.o: \
+    src/ws.c $(DEPS_WS)
+	@echo '   [Compile] $(BUILD)/obj/ws.o'
+	$(CC) -c -o $(BUILD)/obj/ws.o $(CFLAGS) $(DFLAGS) -D_FILE_OFFSET_BITS=64 -D_FILE_OFFSET_BITS=64 -DMBEDTLS_USER_CONFIG_FILE=\"embedtls.h\" -DME_COM_OPENSSL_PATH=$(ME_COM_OPENSSL_PATH) $(IFLAGS) "-I$(ME_COM_OPENSSL_PATH)/include" src/ws.c
 
 #
 #   action.o
@@ -510,6 +521,7 @@ ifeq ($(ME_COM_OPENSSL),1)
 endif
 DEPS_36 += $(BUILD)/inc/goahead.h
 DEPS_36 += $(BUILD)/inc/js.h
+DEPS_36 += $(BUILD)/obj/ws.o
 DEPS_36 += $(BUILD)/obj/action.o
 DEPS_36 += $(BUILD)/obj/alloc.o
 DEPS_36 += $(BUILD)/obj/auth.o
@@ -560,7 +572,7 @@ endif
 
 $(BUILD)/bin/libgo.so: $(DEPS_36)
 	@echo '      [Link] $(BUILD)/bin/libgo.so'
-	$(CC) -shared -o $(BUILD)/bin/libgo.so $(LDFLAGS) $(LIBPATHS)  "$(BUILD)/obj/action.o" "$(BUILD)/obj/alloc.o" "$(BUILD)/obj/auth.o" "$(BUILD)/obj/cgi.o" "$(BUILD)/obj/crypt.o" "$(BUILD)/obj/file.o" "$(BUILD)/obj/fs.o" "$(BUILD)/obj/http.o" "$(BUILD)/obj/js.o" "$(BUILD)/obj/jst.o" "$(BUILD)/obj/options.o" "$(BUILD)/obj/osdep.o" "$(BUILD)/obj/rom.o" "$(BUILD)/obj/route.o" "$(BUILD)/obj/runtime.o" "$(BUILD)/obj/socket.o" "$(BUILD)/obj/time.o" "$(BUILD)/obj/upload.o" $(LIBPATHS_36) $(LIBS_36) $(LIBS_36) $(LIBS) 
+	$(CC) -shared -o $(BUILD)/bin/libgo.so $(LDFLAGS) $(LIBPATHS)  "$(BUILD)/obj/ws.o" "$(BUILD)/obj/action.o" "$(BUILD)/obj/alloc.o" "$(BUILD)/obj/auth.o" "$(BUILD)/obj/cgi.o" "$(BUILD)/obj/crypt.o" "$(BUILD)/obj/file.o" "$(BUILD)/obj/fs.o" "$(BUILD)/obj/http.o" "$(BUILD)/obj/js.o" "$(BUILD)/obj/jst.o" "$(BUILD)/obj/options.o" "$(BUILD)/obj/osdep.o" "$(BUILD)/obj/rom.o" "$(BUILD)/obj/route.o" "$(BUILD)/obj/runtime.o" "$(BUILD)/obj/socket.o" "$(BUILD)/obj/time.o" "$(BUILD)/obj/upload.o" $(LIBPATHS_36) $(LIBS_36) $(LIBS_36) $(LIBS) 
 
 #
 #   install-certs

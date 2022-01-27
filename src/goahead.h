@@ -329,6 +329,7 @@ PUBLIC void traceProc(int level, cchar *fmt, ...);
     Standard HTTP/1.1 status codes
  */
 #define HTTP_CODE_CONTINUE                  100     /**< Continue with request, only partial content transmitted */
+#define HTTP_CODE_SWITCH_PROTO              101     /**< */
 #define HTTP_CODE_OK                        200     /**< The request completed successfully */
 #define HTTP_CODE_CREATED                   201     /**< The request has completed and a new resource was created */
 #define HTTP_CODE_ACCEPTED                  202     /**< The request has been accepted and processing is continuing */
@@ -1845,6 +1846,8 @@ PUBLIC WebsUpload *websLookupUpload(struct Webs *wp, cchar *key);
 #if ME_GOAHEAD_LEGACY
 #define WEBS_LOCAL              0x8000      /**< Request from local system */
 #endif
+#define WEBS_SOCKET             0x10000     /**< Upgrade websocket */
+#define WEBS_UPGRADE            0x20000     /**< Connection Upgrade */
 
 /*
     Incoming chunk encoding states. Used for tx and rx chunking.
@@ -2021,6 +2024,15 @@ typedef struct WebsHandler {
     WebsHandlerClose    close;              /**< Handler close callback  */
     int                 flags;              /**< Handler control flags */
 } WebsHandler;
+
+/**
+    Upgrade a request connection to websocket
+    @param wp Webs request object
+    @return Zero if successful, otherwise -1.
+    @ingroup Webs
+    @stability Stable
+ */
+PUBLIC int wsUpgrade(Webs *wp);
 
 /**
     Action callback
