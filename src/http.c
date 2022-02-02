@@ -554,7 +554,7 @@ static void reuseConn(Webs *wp)
         socketReservice(wp->sid);
     }
     termWebs(wp, 1);
-    initWebs(wp, wp->flags & (WEBS_KEEP_ALIVE | WEBS_SECURE | WEBS_HTTP11), 1);
+    initWebs(wp, wp->flags & (WEBS_KEEP_ALIVE | WEBS_SECURE | WEBS_HTTP11 | WEBS_SOCKET), 1);
 }
 
 
@@ -865,7 +865,10 @@ PUBLIC void websPump(Webs *wp)
     for (canProceed = 1; canProceed; ) {
         switch (wp->state) {
         case WEBS_BEGIN:
-            canProceed = parseIncoming(wp);
+            if(!(wp->flags & WEBS_SOCKET))
+                canProceed = parseIncoming(wp);
+            else
+                canProceed = parseWebsocketIncoming(wp);
             break;
         case WEBS_CONTENT:
             canProceed = processContent(wp);
@@ -929,6 +932,7 @@ static bool parseIncoming(Webs *wp)
 
     if ((wp->flags & (WEBS_SOCKET | WEBS_UPGRADE)) == (WEBS_SOCKET | WEBS_UPGRADE)) {
         wsUpgrade(wp);
+        wp->flags |= WEBS_KEEP_ALIVE;
         wp->state = WEBS_COMPLETE;
         return 1;
     }
@@ -2413,7 +2417,7 @@ static void checkTimeout(void *arg, int id)
     assert(websValid(wp));
 
     if(!!(wp->flags | WEBS_SOCKET)) {
-        logmsg(2, "websocket timeout, should PING?");
+        wsPing(wp);
         websNoteRequestActivity(wp);
     }
     elapsed = getTimeSinceMark(wp) * 1000;
