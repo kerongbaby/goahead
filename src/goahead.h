@@ -1884,6 +1884,8 @@ PUBLIC WebsUpload *websLookupUpload(struct Webs *wp, cchar *key);
  */
 typedef void (*WebsWriteProc)(struct Webs *wp);
 
+typedef struct Websocket Websocket;
+
 /**
     GoAhead request structure. This is a per-socket connection structure.
     @defgroup Webs Webs
@@ -1987,6 +1989,7 @@ typedef struct Webs {
     char            *uploadTmp;         /**< Current temp filename for upload data */
     char            *uploadVar;         /**< Current upload form variable name */
 #endif
+    Websocket       *websocket;
     void            *ssl;               /**< SSL context */
 } Webs;
 

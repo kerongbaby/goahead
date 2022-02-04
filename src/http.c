@@ -268,6 +268,7 @@ PUBLIC int websOpen(cchar *documents, cchar *routeFile)
     websOptionsOpen();
     websActionOpen();
     websFileOpen();
+    websSocketOpen();
 #if ME_GOAHEAD_UPLOAD
     websUploadOpen();
 #endif
@@ -366,7 +367,7 @@ static void initWebs(Webs *wp, int flags, int reuse)
     void        *ssl;
     char        ipaddr[ME_MAX_IP], ifaddr[ME_MAX_IP];
     int         wid, sid, timeout, listenSid;
-
+    void        *websocket = NULL;
     assert(wp);
 
     if (reuse) {
@@ -379,6 +380,7 @@ static void initWebs(Webs *wp, int flags, int reuse)
         scopy(ipaddr, sizeof(ipaddr), wp->ipaddr);
         scopy(ifaddr, sizeof(ifaddr), wp->ifaddr);
         timestamp = wp->timestamp;
+        websocket = wp->websocket;
     } else {
         wid = sid = -1;
         timeout = -1;
@@ -387,6 +389,7 @@ static void initWebs(Webs *wp, int flags, int reuse)
         timestamp = 0;
     }
     memset(wp, 0, sizeof(Webs));
+    wp->websocket = websocket;
     wp->flags = flags;
     wp->state = WEBS_BEGIN;
     wp->wid = wid;
@@ -2417,7 +2420,7 @@ static void checkTimeout(void *arg, int id)
     assert(websValid(wp));
 
     if(!!(wp->flags | WEBS_SOCKET)) {
-        wsPing(wp);
+        // wsPing(wp);
         websNoteRequestActivity(wp);
     }
     elapsed = getTimeSinceMark(wp) * 1000;

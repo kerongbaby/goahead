@@ -3,13 +3,21 @@
 <head>
 <title>Home Page</title>
 <script type="text/javascript">
+    var count = 0;
     function wsOnline() {
         const ws = new WebSocket("ws://" + window.location.host + "/websocket");
+        var timer;
         ws.onopen = e => {
             console.log(`WebSocket onopen state: ${ws.readyState}`)
+            timer = setInterval(function() {
+                console.log("Send message");
+                ws.send("HELLO: " + count);
+                count++;
+            }, 1000);
         }
 
         ws.onerror = e => {
+            clearInterval(timer);
             if(null == e)
                 console.log("WebSocket error with " + e);
             else
@@ -22,6 +30,7 @@
 
         ws.onclose = data => {
             console.log("WebSocket onclose closed")
+            clearInterval(timer);
             console.log(data);
         }
     }
