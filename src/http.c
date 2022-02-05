@@ -2419,10 +2419,9 @@ static void checkTimeout(void *arg, int id)
     wp = (Webs*) arg;
     assert(websValid(wp));
 
-    if(!!(wp->flags | WEBS_SOCKET)) {
-        // wsPing(wp);
-        websNoteRequestActivity(wp);
-    }
+    if(!!(wp->flags & WEBS_SOCKET))
+        checkWebsocketTimeout(wp);
+
     elapsed = getTimeSinceMark(wp) * 1000;
     if (websDebug) {
         websRestartEvent(id, (int) WEBS_TIMEOUT);

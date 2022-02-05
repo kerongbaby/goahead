@@ -77,6 +77,8 @@ struct Websocket {
     evhtp_ws_frame        frame;
     struct event        * pingev;
     uint8_t               pingct;
+    bool                  ws_cont;
+    WebsBuf               content;              /**< Decoded message */
 };
 
 #define HAS_EXTENDED_PAYLOAD_HDR(__frame) ((__frame)->len >= 126)
@@ -117,23 +119,19 @@ PUBLIC int wsUpgrade(Webs *wp)
     memset(buffer, 0x0, sizeof(buffer));
     strcpy(buffer, key);
     strcat(buffer, EVHTP_WS_MAGIC);
-    logmsg(2, "Response for websocket upgrade, wp key: %s", buffer);
 
     unsigned char digest[20];
     mbedtls_sha1_ret(buffer, strlen(buffer), digest);
     size_t len;
     mbedtls_base64_encode( buffer, sizeof( buffer ), &len, digest, sizeof(digest) );
-    logmsg(2, "Response for websocket upgrade, wp key: %s", buffer);
 
     websSetStatus(wp, HTTP_CODE_SWITCH_PROTO);
     websWriteHeaders(wp, 0, NULL);
     websWriteHeader(wp, "Upgrade", "websocket");
     websWriteHeader(wp, "Connection", "Upgrade");
     websWriteHeader(wp, "Sec-WebSocket-Accept", buffer);
-    char *upgrade = websGetVar(wp, "Upgrade", NULL);
     // At this point, if the client supports one of the advertised versions,
     // it can repeat the WebSocket handshake using a new version value.
-    // if(NULL != upgrade)
     char *value = websGetVar(wp, "sec-websocket-protocol", NULL);
     if(NULL != value) {
         logmsg(2, "sec-websocket-protocol: %s", value);
@@ -141,7 +139,9 @@ PUBLIC int wsUpgrade(Webs *wp)
     }
     websWriteEndHeaders(wp);
     wp->websocket = walloc(sizeof(*wp->websocket));
+    memset(wp->websocket, 0x0, sizeof(*wp->websocket));
     wp->websocket->state = ws_s_start;
+    bufCreate(&wp->websocket->content, ME_GOAHEAD_LIMIT_BUFFER + 1, ME_GOAHEAD_LIMIT_PUT + 1);
 
     websDone(wp);
     return 1;
@@ -149,13 +149,22 @@ PUBLIC int wsUpgrade(Webs *wp)
 
 PUBLIC void wsPing(Webs *wp) {
     logmsg(2, "websocket timeout, do PING");
-
     static unsigned char outbuf[2] = {0x89,0x00};
+    Websocket *p = wp->websocket;
+    p->pingct++;
 
     wp->state = WEBS_RUNNING;
     if(sizeof(outbuf) != websWriteBlock(wp, outbuf, sizeof(outbuf)))
         logmsg(2, "wsPing write failed? state: %d", wp->state);
     websDone(wp);
+}
+
+PUBLIC void checkWebsocketTimeout(Webs *wp) {
+    if(!(wp->flags & WEBS_SOCKET))
+        return;
+
+    wsPing(wp);
+    websNoteRequestActivity(wp);
 }
 
 static uint64_t ntoh64(const uint64_t input)
@@ -178,9 +187,8 @@ static uint64_t ntoh64(const uint64_t input)
 /* use and prepend existing evbuffer with websocket header */
 void evhtp_ws_add_header(Webs *wp, size_t len, uint8_t opcode)
 {
-//    size_t          len = evbuffer_get_length(buf),
-    size_t                    bufsz = 10;
     uint8_t         pbuf[10];
+    size_t          bufsz;
 
     pbuf[0] = opcode | 0x80;
 
@@ -205,9 +213,6 @@ void evhtp_ws_add_header(Webs *wp, size_t len, uint8_t opcode)
         bufsz = 10;
     }
     websWriteBlock(wp, pbuf, bufsz);
-//    bufPutBlk(&wp->output, pbuf, bufsz);
-    // outgoing data is not masked, so send as is, prepended with header
-    // if(evbuffer_prepend(buf, pbuf, bufsz))
 }
 
 /* formulate a pong response */
@@ -221,273 +226,261 @@ bool parseWebsocketIncoming(Webs *wp) {
     WebsBuf     *rxbuf;
     char        *end, c;
     rxbuf = &wp->rxbuf;
-    logmsg(2, "parseWebsocketIncoming %p, buflen: %d", wp, bufLen(rxbuf));
-    debugWebsocket(wp, __func__, __LINE__);
+
+//    debugWebsocket(wp, __func__, __LINE__);
+#if 0
     if(bufLen(rxbuf) <= 0) {
         wp->state = WEBS_COMPLETE;
         return 0;
     }
+#endif
     int cc;
     Websocket *p = wp->websocket;
-    logmsg(2, "parseWebsocketIncoming, Websocket: %p", p);
-//    p.state = ws_s_start;
-//    while (bufLen(rxbuf) > 0) {
-        switch (p->state)
+//    logmsg(2, "parseWebsocketIncoming, Websocket: %p", p);
+    switch (p->state)
+    {
+    case ws_s_start:
+        p->state            = ws_s_fin_rsv_opcode;
+        p->content_len      = 0;
+        p->orig_content_len = 0;
+        p->content_idx      = 0;
+        p->status_code      = 0;
+    /* fall-through */
+    case ws_s_fin_rsv_opcode:
+        if((cc = bufGetc(rxbuf)) < 0) {
+            p->state = ws_s_start;
+            wp->state = WEBS_COMPLETE;
+            return 0;
+        }
+        p->frame.hdr.fin    = (cc & 0x80)? 1:0;
+        p->frame.hdr.opcode = (cc & 0xF);
+        //sanity check 1
+        if(
+            p->frame.hdr.fin != OP_CONT && p->frame.hdr.fin != OP_TEXT &&
+            p->frame.hdr.fin != OP_BIN  && p->frame.hdr.fin != OP_PING &&
+            p->frame.hdr.fin != OP_PONG && p->frame.hdr.fin != OP_CLOSE
+        )
         {
-        case ws_s_start:
-            p->state            = ws_s_fin_rsv_opcode;
-            p->content_len      = 0;
-            p->orig_content_len = 0;
-            p->content_idx      = 0;
-            p->status_code      = 0;
-        /* fall-through */
-        case ws_s_fin_rsv_opcode:
-            if((cc = bufGetc(rxbuf)) < 0) {
-                logmsg(2, "Warning: websockets - ws_s_fin_rsv_opcode failed");
-                return 0;
-            }
-            p->frame.hdr.fin    = (cc & 0x80)? 1:0;
-            p->frame.hdr.opcode = (cc & 0xF);
-
-            //printf("parser run, opcode=%d ws_cont=%d\n", (int)p->frame.hdr.opcode, (int) req->ws_cont);
-
-            //sanity check 1
-            if(
-                p->frame.hdr.fin != OP_CONT && p->frame.hdr.fin != OP_TEXT &&
-                p->frame.hdr.fin != OP_BIN  && p->frame.hdr.fin != OP_PING &&
-                p->frame.hdr.fin != OP_PONG && p->frame.hdr.fin != OP_CLOSE
-            )
-            {
-                logmsg(2, "Warning: websockets - invalid opcode %d\n", p->frame.hdr.opcode);
-                return 0;
-            }
-#if 0
-            //sanity check 2
-            if(req->ws_cont && p.frame.hdr.opcode !=OP_CONT)
-            {
-                logmsg(2, "Warning: websockets - expecting a continue frame but got opcode %d\n", p.frame.hdr.opcode);
-                return -1;
-            }
-
-            //sanity check 3
-            if (!req->ws_cont && p.frame.hdr.opcode == OP_CONT)
-            {
-                logmsg(2, "Warning: websockets - not expecting a continue frame but got opcode OP_CONT\n");
-                return -1;
-            }
-
-            req->ws_cont = !p.frame.hdr.fin;
-#endif
-            p->state = ws_s_mask_payload_len;
-            logmsg(2, "ws_s_fin_rsv_opcode: %02X", p->frame.hdr.opcode);
-            break;
-
-        case ws_s_mask_payload_len:
-            if((cc = bufGetc(rxbuf)) < 0) {
-                logmsg(2, "Warning: websockets - ws_s_mask_payload_len failed");
-                return 0;
-            }
-
-            logmsg(2, "ws_s_mask_payload_len");
-            p->frame.hdr.mask   = ((cc & 0x80) ? 1 : 0);
-            p->frame.hdr.len    = (cc & 0x7F);
-            switch (EXTENDED_PAYLOAD_HDR_LEN(p->frame.hdr.len)) {
-                case 0:
-                    p->frame.payload_len = p->frame.hdr.len;
-                    p->content_len       = p->frame.payload_len;
-                    p->orig_content_len  = p->content_len;
-
-                    if (p->frame.hdr.mask == 1) {
-                        p->state = ws_s_masking_key;
-                        break;
-                    }
-
-                    p->state = ws_s_payload;
-                    break;
-                case 16:
-                    p->state = ws_s_ext_payload_len_16;
-                    break;
-                case 64:
-                    p->state = ws_s_ext_payload_len_64;
-                    break;
-                default:
-                    return -1;
-            } /* switch */
-            break;
-
-        case ws_s_ext_payload_len_16: {
-            logmsg(2, "ws_s_ext_payload_len_16");
-            unsigned char t[2];
-            if(bufGetBlk(wp, t, sizeof(t)) < sizeof(t)) {
-                logmsg(2, "Warning: websockets - ws_s_ext_payload_len_16 short");
-                return 0;
-            }
-#if 0
-            if (MIN_READ((const char *)(data + len) - &data[i], 2) < 2) {
-                return i;
-            }
-#endif
-            p->frame.payload_len = ntohs(*(uint16_t *)t);
-//            p.frame.payload_len = p.frame.payload_len << 8 | (bufGetc(rxbuf) & 0xff);
-            p->content_len       = p->frame.payload_len;
-            //printf("16 - content_len = %d\n",  (int)p->content_len);
-            logmsg(2, "16 - content_len = %d",  (int)p->content_len);
-            p->orig_content_len  = p->content_len;
-
-            // i += 2;
-
-            if (p->frame.hdr.mask == 1) {
-                p->state = ws_s_masking_key;
-                break;
-            }
-
-            p->state = ws_s_payload;
-            break;
-        }
-        case ws_s_ext_payload_len_64: {
-            logmsg(2, "ws_s_ext_payload_len_64");
-            unsigned char t[8];
-            if(bufGetBlk(rxbuf, t, sizeof(t)) < sizeof(t)) {
-                logmsg(2, "Warning: websockets - ws_s_ext_payload_len_64 short");
-                return 0;
-            }
-
-#if 0
-            if (MIN_READ((const char *)(data + len) - &data[i], 8) < 8) {
-                return i;
-            }
-#endif
-
-            p->frame.payload_len = ntoh64(*(uint64_t *)t);
-            p->content_len       = p->frame.payload_len;
-            p->orig_content_len  = p->content_len;
-            logmsg(2, "64 - content_len = %d",  (int)p->content_len);
-            if (p->frame.hdr.mask == 1) {
-                p->state = ws_s_masking_key;;
-                break;
-            }
-
-            p->state = ws_s_payload;
-            break;
-        }
-        case ws_s_masking_key: {
-            unsigned char t[4];
-            if(bufGetBlk(rxbuf, t, sizeof(t)) < sizeof(t)) {
-                logmsg(2, "Warning: websockets - ws_s_masking_key short");
-                return 0;
-            }
-
-            logmsg(2, "ws_s_masking_key");
-#if 0
-            int min= MIN_READ((const char *)(data + len) - &data[i], 4);
-            if (min < 4) 
-            {
-                return i;
-            }
-#endif
-            p->frame.masking_key = *(uint32_t *)t;
-            logmsg(2, "ws_s_masking_key: %08X", p->frame.masking_key);
-            p->state = ws_s_payload;
-#if 0
-            if(min==4) // i==len, so go directly to finish.
-                goto fini;
-#endif
-            break;
+            logmsg(2, "Warning: websockets - invalid opcode %d\n", p->frame.hdr.opcode);
+            return 0;
         }
 
-            case ws_s_payload: {
-            logmsg(2, "ws_s_payload");
-                /* op_close case */
-                if (p->frame.hdr.opcode == OP_CLOSE && p->status_code == 0) {
-                    logmsg(2, "websockets - onClose");
-                    logmsg(2, "websockets - ws_s_payload length: %d", bufLen(wp));
-                    uint64_t index;
-                    uint32_t mkey;
-                    int      j1;
-                    int      j2;
-                    int      m1;
-                    int      m2;
-                    char     buf[2];
-                    if(bufLen(wp) < 2) {
-                    // if (MIN_READ((const char *)(data + len) - &data[i], 2) < 2) {
-                        return 0;
-                    }
+        //sanity check 2
+        if(p->ws_cont && p->frame.hdr.opcode !=OP_CONT)
+        {
+            logmsg(2, "Warning: websockets - expecting a continue frame but got opcode %d\n", p->frame.hdr.opcode);
+            return -1;
+        }
 
-                    index           = p->content_idx;
-                    mkey            = p->frame.masking_key;
+        //sanity check 3
+        if (!p->ws_cont && p->frame.hdr.opcode == OP_CONT)
+        {
+            logmsg(2, "Warning: websockets - not expecting a continue frame but got opcode OP_CONT\n");
+            return -1;
+        }
 
-                    /* our mod4 for the current index */
-                    j1              = index % 4;
-                    /* our mod4 for one past the index. */
-                    j2              = (index + 1) % 4;
+        p->ws_cont = !p->frame.hdr.fin;
 
-                    /* the masks we will be using to xor the buffers */
-                    m1              = (mkey & __MASK[j1]) >> __SHIFT[j1];
-                    m2              = (mkey & __MASK[j2]) >> __SHIFT[j2];
-                    bufGetBlk(wp, buf, sizeof(buf));
-                    buf[0]          = buf[0] ^ m1;
-                    buf[1]          = buf[1] ^ m2;
+        p->state = ws_s_mask_payload_len;
+        logmsg(2, "ws_s_fin_rsv_opcode: %02X", p->frame.hdr.opcode);
+        break;
 
-                    p->status_code  = ntohs(*(uint16_t *)buf);
-                    p->content_len -= 2;
-                    p->content_idx += 2;
-                    /* RFC states that there could be a message after the
-                     * OP_CLOSE 2 byte header, so just drop down and attempt
-                     * to parse it.
-                     */
+    case ws_s_mask_payload_len:
+        if((cc = bufGetc(rxbuf)) < 0) {
+            logmsg(2, "Warning: websockets - ws_s_mask_payload_len failed");
+            return 0;
+        }
+
+        p->frame.hdr.mask   = ((cc & 0x80) ? 1 : 0);
+        p->frame.hdr.len    = (cc & 0x7F);
+        logmsg(2, "ws_s_mask_payload_len: %02X", p->frame.hdr.len);
+        switch (EXTENDED_PAYLOAD_HDR_LEN(p->frame.hdr.len)) {
+            case 0:
+                p->frame.payload_len = p->frame.hdr.len;
+                p->content_len       = p->frame.payload_len;
+                p->orig_content_len  = p->content_len;
+
+                if (p->frame.hdr.mask == 1) {
+                    p->state = ws_s_masking_key;
+                    break;
                 }
+
+                p->state = ws_s_payload;
+                break;
+            case 16:
+                p->state = ws_s_ext_payload_len_16;
+                break;
+            case 64:
+                p->state = ws_s_ext_payload_len_64;
+                break;
+            default:
+                return -1;
+        } /* switch */
+        break;
+
+    case ws_s_ext_payload_len_16: {
+        logmsg(2, "ws_s_ext_payload_len_16");
+        unsigned char t[2];
+        if(bufGetBlk(wp, t, sizeof(t)) < sizeof(t)) {
+            logmsg(2, "Warning: websockets - ws_s_ext_payload_len_16 short");
+            return 0;
+        }
+#if 0
+        if (MIN_READ((const char *)(data + len) - &data[i], 2) < 2) {
+            return i;
+        }
+#endif
+        p->frame.payload_len = ntohs(*(uint16_t *)t);
+//            p.frame.payload_len = p.frame.payload_len << 8 | (bufGetc(rxbuf) & 0xff);
+        p->content_len       = p->frame.payload_len;
+        //printf("16 - content_len = %d\n",  (int)p->content_len);
+        logmsg(2, "16 - content_len = %d",  (int)p->content_len);
+        p->orig_content_len  = p->content_len;
+
+        // i += 2;
+
+        if (p->frame.hdr.mask == 1) {
+            p->state = ws_s_masking_key;
+            break;
+        }
+
+        p->state = ws_s_payload;
+        break;
+    }
+    case ws_s_ext_payload_len_64: {
+        logmsg(2, "ws_s_ext_payload_len_64");
+        unsigned char t[8];
+        if(bufGetBlk(rxbuf, t, sizeof(t)) < sizeof(t)) {
+            logmsg(2, "Warning: websockets - ws_s_ext_payload_len_64 short");
+            return 0;
+        }
+
+#if 0
+        if (MIN_READ((const char *)(data + len) - &data[i], 8) < 8) {
+            return i;
+        }
+#endif
+
+        p->frame.payload_len = ntoh64(*(uint64_t *)t);
+        p->content_len       = p->frame.payload_len;
+        p->orig_content_len  = p->content_len;
+        logmsg(2, "64 - content_len = %d",  (int)p->content_len);
+        if (p->frame.hdr.mask == 1) {
+            p->state = ws_s_masking_key;;
+            break;
+        }
+
+        p->state = ws_s_payload;
+        break;
+    }
+    case ws_s_masking_key: {
+        unsigned char t[4];
+        if(bufGetBlk(rxbuf, t, sizeof(t)) < sizeof(t)) {
+            logmsg(2, "Warning: websockets - ws_s_masking_key short");
+            return 0;
+        }
+        p->frame.masking_key = *(uint32_t *)t;
+        logmsg(2, "ws_s_masking_key: %08X", p->frame.masking_key);
+        p->state = ws_s_payload;
+#if 0
+        if(min==4) // i==len, so go directly to finish.
+            goto fini;
+#endif
+        break;
+    }
+
+    case ws_s_payload: {
+    logmsg(2, "ws_s_payload, opcode: %02X", p->frame.hdr.opcode);
+        /* op_close case */
+        if (p->frame.hdr.opcode == OP_CLOSE && p->status_code == 0) {
+            logmsg(2, "websockets - onClose");
+            logmsg(2, "websockets - ws_s_payload length: %d", bufLen(wp));
+            uint64_t index;
+            uint32_t mkey;
+            int      j1;
+            int      j2;
+            int      m1;
+            int      m2;
+            char     buf[2];
+            if(bufLen(wp) < 2) {
+            // if (MIN_READ((const char *)(data + len) - &data[i], 2) < 2) {
+                return 0;
+            }
+
+            index           = p->content_idx;
+            mkey            = p->frame.masking_key;
+
+            /* our mod4 for the current index */
+            j1              = index % 4;
+            /* our mod4 for one past the index. */
+            j2              = (index + 1) % 4;
+
+            /* the masks we will be using to xor the buffers */
+            m1              = (mkey & __MASK[j1]) >> __SHIFT[j1];
+            m2              = (mkey & __MASK[j2]) >> __SHIFT[j2];
+            bufGetBlk(wp, buf, sizeof(buf));
+            buf[0]          = buf[0] ^ m1;
+            buf[1]          = buf[1] ^ m2;
+
+            p->status_code  = ntohs(*(uint16_t *)buf);
+            p->content_len -= 2;
+            p->content_idx += 2;
+            /* RFC states that there could be a message after the
+                * OP_CLOSE 2 byte header, so just drop down and attempt
+                * to parse it.
+                */
+        }
 
 //                bufFlush(&wp->output);
-                logmsg(2, "1 output buf len: %0d rxbuf len: %d, content length: %d, content_idx %d", bufLen(&wp->output), bufLen(rxbuf), p->content_len, p->content_idx);
-                if(bufLen(rxbuf) > 0) {
-                    int  z;
-                    while((z = bufGetc(rxbuf)) >= 0) {
-                        int           j = p->content_idx % 4;
-                        unsigned char xformed_oct;
-                        xformed_oct     = (p->frame.masking_key & __MASK[j]) >> __SHIFT[j];
-                        bufPutc(&wp->output, ((unsigned char)(z & 0xff) ^ xformed_oct));
-                        p->content_idx += 1;
-                        if(p->content_idx >= p->content_len)
-                            break;
-                    }
-                    p->state = ws_s_start; // ws_s_fin;
-                logmsg(2, "websockets - hook code: %02X, content length: %d, content_idx: %d", p->frame.hdr.opcode, p->content_len, p->content_idx);
-  //?                  p.content_len -= to_read;
-//                    i += to_read;
-                }
-                else if (p->frame.hdr.opcode == OP_CONT) //0 size on a cont frame -- something isn't right.
-                    return -1;
-
-                fini:
-        
-                //printf("length=%d, fin= %d\n", (int)p->content_len, (int)p->frame.hdr.fin);
-
-                /* did we get it all? */
-                if (p->content_len == 0)
-                {
-                    /* this is the end, set it to restart if another frame is coming (p->frame.hdr.fin==0) 
-                       or for the next request                                                              */
-                    p->state = ws_s_start;
-                    if(p->frame.hdr.fin == 1 )
-                    {
-//                        req->ws_cont = 0;
-                        /*currently, this always returns 0 */
-//                        (void)(hooks->on_msg_fini)(p);
-                    logmsg(2, "websockets 3 - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
-                        return 0;
-                    }
-                }
-
-                break;
+        logmsg(2, "1 output buf len: %0d rxbuf len: %d, content length: %d, content_idx %d", bufLen(&wp->output), bufLen(rxbuf), p->content_len, p->content_idx);
+        if(bufLen(rxbuf) > 0) {
+            int  z;
+            while((p->content_idx < p->content_len) && (z = bufGetc(rxbuf)) >= 0) {
+                int           j = p->content_idx % 4;
+                unsigned char xformed_oct;
+                xformed_oct     = (p->frame.masking_key & __MASK[j]) >> __SHIFT[j];
+                bufPutc(&p->content, ((unsigned char)(z & 0xff) ^ xformed_oct));
+                p->content_idx += 1;
+//                if(p->content_idx >= p->content_len)                    break;
             }
-        case ws_s_fin:
-            logmsg(2, "websockets - ws_s_fin");
-            p->state = ws_s_start;
-            break;
-        default:
-            break;
+            p->state = ws_s_start; // ws_s_fin;
+        logmsg(2, "websockets - hook code: %02X, content length: %d, content_idx: %d", p->frame.hdr.opcode, p->content_len, p->content_idx);
+//?                  p.content_len -= to_read;
+//                    i += to_read;
         }
-//    };
+        else if (p->frame.hdr.opcode == OP_CONT) //0 size on a cont frame -- something isn't right.
+            return -1;
+
+        fini:
+
+        //printf("length=%d, fin= %d\n", (int)p->content_len, (int)p->frame.hdr.fin);
+
+        /* did we get it all? */
+        if (p->content_len == 0)
+        {
+            /* this is the end, set it to restart if another frame is coming (p->frame.hdr.fin==0) 
+                or for the next request                                                              */
+            p->state = ws_s_start;
+            if(p->frame.hdr.fin == 1 )
+            {
+//                        req->ws_cont = 0;
+                /*currently, this always returns 0 */
+//                        (void)(hooks->on_msg_fini)(p);
+            logmsg(2, "websockets 3 - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
+            p->state = ws_s_start; // ws_s_fin;
+//                return 0;
+            }
+        }
+
+        break;
+    }
+    case ws_s_fin:
+        logmsg(2, "websockets - ws_s_fin");
+        p->state = ws_s_start;
+        break;
+    default:
+        break;
+    }
 
     if(p->state == ws_s_mask_payload_len
     || p->state == ws_s_masking_key
@@ -505,7 +498,8 @@ bool parseWebsocketIncoming(Webs *wp) {
         wp->state = WEBS_COMPLETE;
         return 1;
     } else  if(p->frame.hdr.opcode == OP_PONG) {
-        logmsg(2, "websockets - PONG Recv");
+        p->pingct--;
+        logmsg(2, "websockets - PONG Recv, ping count: %d", p->pingct);
         wp->state = WEBS_COMPLETE;
         return 1;
     } else if(p->frame.hdr.opcode == OP_TEXT) {
@@ -514,8 +508,10 @@ bool parseWebsocketIncoming(Webs *wp) {
         wp->method = supper(sclone("POST"));
         wp->protocol = "http";
         wp->state = WEBS_READY;
+//        trace(2, "Route %s calls handler %s", route->prefix, route->handler->name);
         websRouteRequest(wp);
         p->content_idx = 0;
+        p->state = ws_s_start;
         return 1;
     } else
     logmsg(2, "websockets - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
@@ -534,7 +530,9 @@ static bool websocketHandler(Webs *wp) {
     assert(wp->websocket);
     Websocket *p = wp->websocket;
     logmsg(2, "websocketHandler - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
-    WebsBuf *buf = &wp->output;
+    WebsBuf *buf = &p->content;
+    bufAddNull(buf);
+#if 0
     if(p->content_len > buf->buflen) {
         logmsg(2, "websocketHandler - short content");
         return 0;
@@ -544,6 +542,11 @@ static bool websocketHandler(Webs *wp) {
     memcpy(message, buf->servp, p->content_len);
     logmsg(2, "%s ", message);
     wfree(message);
+#else
+    logmsg(2, "%s ", buf->servp);
+    bufFlush(buf);
+#endif
+
     // prepare for next message.
     wp->state = WEBS_BEGIN;
     return 1;
