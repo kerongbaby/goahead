@@ -64,7 +64,6 @@ enum evhtp_ws_parser_state {
     ws_s_ext_payload_len_64,
     ws_s_masking_key,
     ws_s_payload,
-    ws_s_fin
 };
 
 struct Websocket {
@@ -78,7 +77,8 @@ struct Websocket {
     struct event        * pingev;
     uint8_t               pingct;
     bool                  ws_cont;
-    WebsBuf               content;              /**< Decoded message */
+    char *path;
+    char *protocol;
 };
 
 #define HAS_EXTENDED_PAYLOAD_HDR(__frame) ((__frame)->len >= 126)
@@ -141,30 +141,38 @@ PUBLIC int wsUpgrade(Webs *wp)
     wp->websocket = walloc(sizeof(*wp->websocket));
     memset(wp->websocket, 0x0, sizeof(*wp->websocket));
     wp->websocket->state = ws_s_start;
-    bufCreate(&wp->websocket->content, ME_GOAHEAD_LIMIT_BUFFER + 1, ME_GOAHEAD_LIMIT_PUT + 1);
+    wp->websocket->path = sclone(wp->path);
+    wp->websocket->protocol = sclone(wp->protocol);
 
     websDone(wp);
+    logmsg(2, "Create websocket instance.");
     return 1;
 }
 
 PUBLIC void wsPing(Webs *wp) {
+    if(bufLen(&wp->output) > 0) {
+        logmsg(2, "posible did not need PING");
+        return;
+    }
+
     logmsg(2, "websocket timeout, do PING");
     static unsigned char outbuf[2] = {0x89,0x00};
     Websocket *p = wp->websocket;
     p->pingct++;
-
     wp->state = WEBS_RUNNING;
     if(sizeof(outbuf) != websWriteBlock(wp, outbuf, sizeof(outbuf)))
         logmsg(2, "wsPing write failed? state: %d", wp->state);
     websDone(wp);
+    wp->state = WEBS_COMPLETE;
 }
 
 PUBLIC void checkWebsocketTimeout(Webs *wp) {
     if(!(wp->flags & WEBS_SOCKET))
         return;
 
-    wsPing(wp);
     websNoteRequestActivity(wp);
+    websSetBackgroundWriter(wp, wsPing);
+//    wsPing(wp);
 }
 
 static uint64_t ntoh64(const uint64_t input)
@@ -228,12 +236,6 @@ bool parseWebsocketIncoming(Webs *wp) {
     rxbuf = &wp->rxbuf;
 
 //    debugWebsocket(wp, __func__, __LINE__);
-#if 0
-    if(bufLen(rxbuf) <= 0) {
-        wp->state = WEBS_COMPLETE;
-        return 0;
-    }
-#endif
     int cc;
     Websocket *p = wp->websocket;
 //    logmsg(2, "parseWebsocketIncoming, Websocket: %p", p);
@@ -282,7 +284,7 @@ bool parseWebsocketIncoming(Webs *wp) {
         p->ws_cont = !p->frame.hdr.fin;
 
         p->state = ws_s_mask_payload_len;
-        logmsg(2, "ws_s_fin_rsv_opcode: %02X", p->frame.hdr.opcode);
+        // logmsg(2, "ws_s_fin_rsv_opcode: %02X", p->frame.hdr.opcode);
         break;
 
     case ws_s_mask_payload_len:
@@ -293,7 +295,7 @@ bool parseWebsocketIncoming(Webs *wp) {
 
         p->frame.hdr.mask   = ((cc & 0x80) ? 1 : 0);
         p->frame.hdr.len    = (cc & 0x7F);
-        logmsg(2, "ws_s_mask_payload_len: %02X", p->frame.hdr.len);
+        // logmsg(2, "ws_s_mask_payload_len: %02X", p->frame.hdr.len);
         switch (EXTENDED_PAYLOAD_HDR_LEN(p->frame.hdr.len)) {
             case 0:
                 p->frame.payload_len = p->frame.hdr.len;
@@ -380,17 +382,13 @@ bool parseWebsocketIncoming(Webs *wp) {
             return 0;
         }
         p->frame.masking_key = *(uint32_t *)t;
-        logmsg(2, "ws_s_masking_key: %08X", p->frame.masking_key);
+        // logmsg(2, "ws_s_masking_key: %08X", p->frame.masking_key);
         p->state = ws_s_payload;
-#if 0
-        if(min==4) // i==len, so go directly to finish.
-            goto fini;
-#endif
         break;
     }
 
     case ws_s_payload: {
-    logmsg(2, "ws_s_payload, opcode: %02X", p->frame.hdr.opcode);
+    // logmsg(2, "ws_s_payload, opcode: %02X", p->frame.hdr.opcode);
         /* op_close case */
         if (p->frame.hdr.opcode == OP_CLOSE && p->status_code == 0) {
             logmsg(2, "websockets - onClose");
@@ -432,28 +430,28 @@ bool parseWebsocketIncoming(Webs *wp) {
         }
 
 //                bufFlush(&wp->output);
-        logmsg(2, "1 output buf len: %0d rxbuf len: %d, content length: %d, content_idx %d", bufLen(&wp->output), bufLen(rxbuf), p->content_len, p->content_idx);
+        // logmsg(2, "1 output buf len: %0d rxbuf len: %d, content length: %d, content_idx %d", bufLen(&wp->output), bufLen(rxbuf), p->content_len, p->content_idx);
+        if(bufLen(rxbuf) < p->content_len) {
+            logmsg(2, "TODO: handle error for content short");
+        }
+
         if(bufLen(rxbuf) > 0) {
             int  z;
-            while((p->content_idx < p->content_len) && (z = bufGetc(rxbuf)) >= 0) {
+            while(p->content_idx < p->content_len) {
                 int           j = p->content_idx % 4;
                 unsigned char xformed_oct;
                 xformed_oct     = (p->frame.masking_key & __MASK[j]) >> __SHIFT[j];
-                bufPutc(&p->content, ((unsigned char)(z & 0xff) ^ xformed_oct));
+                rxbuf->servp[p->content_idx] ^= xformed_oct;
                 p->content_idx += 1;
 //                if(p->content_idx >= p->content_len)                    break;
             }
-            p->state = ws_s_start; // ws_s_fin;
-        logmsg(2, "websockets - hook code: %02X, content length: %d, content_idx: %d", p->frame.hdr.opcode, p->content_len, p->content_idx);
-//?                  p.content_len -= to_read;
-//                    i += to_read;
+            p->state = ws_s_start;
+        // logmsg(2, "websockets - hook code: %02X, content length: %d, content_idx: %d", p->frame.hdr.opcode, p->content_len, p->content_idx);
         }
         else if (p->frame.hdr.opcode == OP_CONT) //0 size on a cont frame -- something isn't right.
             return -1;
 
         fini:
-
-        //printf("length=%d, fin= %d\n", (int)p->content_len, (int)p->frame.hdr.fin);
 
         /* did we get it all? */
         if (p->content_len == 0)
@@ -463,21 +461,16 @@ bool parseWebsocketIncoming(Webs *wp) {
             p->state = ws_s_start;
             if(p->frame.hdr.fin == 1 )
             {
+                p->ws_cont = 0;
 //                        req->ws_cont = 0;
                 /*currently, this always returns 0 */
 //                        (void)(hooks->on_msg_fini)(p);
-            logmsg(2, "websockets 3 - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
-            p->state = ws_s_start; // ws_s_fin;
-//                return 0;
+                logmsg(2, "websockets - fin");
             }
         }
 
         break;
     }
-    case ws_s_fin:
-        logmsg(2, "websockets - ws_s_fin");
-        p->state = ws_s_start;
-        break;
     default:
         break;
     }
@@ -502,13 +495,18 @@ bool parseWebsocketIncoming(Webs *wp) {
         logmsg(2, "websockets - PONG Recv, ping count: %d", p->pingct);
         wp->state = WEBS_COMPLETE;
         return 1;
+    } else if(p->frame.hdr.opcode == OP_CLOSE) {
+        logmsg(2, "websockets - CLOSE, state: %d", p->status_code);
+        websDone(wp);
+        wp->flags &= ~WEBS_KEEP_ALIVE;
+        wp->state = WEBS_COMPLETE;
+        // TODO: free websocket instance.
+        return 1;
     } else if(p->frame.hdr.opcode == OP_TEXT) {
-        logmsg(2, "websockets - TEXT");
-        wp->path = sclone("/websocket");
-        wp->method = supper(sclone("POST"));
-        wp->protocol = "http";
+        wp->path = sclone(p->path);
+        wp->method = sclone("POST");
+        wp->protocol = sclone(p->protocol);
         wp->state = WEBS_READY;
-//        trace(2, "Route %s calls handler %s", route->prefix, route->handler->name);
         websRouteRequest(wp);
         p->content_idx = 0;
         p->state = ws_s_start;
@@ -529,24 +527,15 @@ static bool websocketHandler(Webs *wp) {
     assert(wp->method);
     assert(wp->websocket);
     Websocket *p = wp->websocket;
-    logmsg(2, "websocketHandler - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
-    WebsBuf *buf = &p->content;
+    // logmsg(2, "websocketHandler - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
+    WebsBuf *buf = &wp->rxbuf;
     bufAddNull(buf);
-#if 0
-    if(p->content_len > buf->buflen) {
-        logmsg(2, "websocketHandler - short content");
-        return 0;
-    }
-    char *message = walloc(p->content_len + 1);
-    memset(message, 0x0, p->content_len + 1);
-    memcpy(message, buf->servp, p->content_len);
-    logmsg(2, "%s ", message);
-    wfree(message);
-#else
     logmsg(2, "%s ", buf->servp);
     bufFlush(buf);
-#endif
 
+    evhtp_ws_add_header(wp, 5, OP_TEXT);
+    websWriteBlock(wp, "HELLO", 5);
+    websDone(wp);
     // prepare for next message.
     wp->state = WEBS_BEGIN;
     return 1;
