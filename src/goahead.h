@@ -2028,14 +2028,6 @@ typedef struct WebsHandler {
     int                 flags;              /**< Handler control flags */
 } WebsHandler;
 
-/**
-    Upgrade a request connection to websocket
-    @param wp Webs request object
-    @return Zero if successful, otherwise -1.
-    @ingroup Webs
-    @stability Stable
- */
-PUBLIC int wsUpgrade(Webs *wp);
 
 /**
     Action callback

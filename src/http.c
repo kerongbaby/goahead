@@ -934,12 +934,6 @@ static bool parseIncoming(Webs *wp)
         return 1;
     }
 
-    if ((wp->flags & (WEBS_SOCKET | WEBS_UPGRADE)) == (WEBS_SOCKET | WEBS_UPGRADE)) {
-        wsUpgrade(wp);
-        wp->flags |= WEBS_KEEP_ALIVE;
-        wp->state = WEBS_COMPLETE;
-        return 1;
-    }
     wp->state = (wp->rxChunkState || wp->rxLen > 0) ? WEBS_CONTENT : WEBS_READY;
 
     websRouteRequest(wp);

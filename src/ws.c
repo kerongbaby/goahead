@@ -111,8 +111,13 @@ PUBLIC void debugWebsocket(Webs *wp, const char *func, int line) {
     logmsg(2, "debugWebsocket %p, state: %d", p, p->state);
 }
 
-PUBLIC int wsUpgrade(Webs *wp)
-{
+static bool websocketMatch(Webs *wp) {
+    if (!(wp->flags & WEBS_SOCKET))
+        return 0;
+
+    if (!(wp->flags & WEBS_UPGRADE))
+        return 1;
+
     char *key = websGetVar(wp, "sec-websocket-key", NULL); 
     size_t key_len = strlen(key);
     unsigned char buffer[128];
@@ -146,6 +151,11 @@ PUBLIC int wsUpgrade(Webs *wp)
 
     websDone(wp);
     logmsg(2, "Create websocket instance.");
+
+    wp->flags |= WEBS_KEEP_ALIVE;
+    wp->state = WEBS_COMPLETE;
+    wp->flags &= ~WEBS_UPGRADE;
+    // TODO: onOpen
     return 1;
 }
 
@@ -566,7 +576,7 @@ static void websocketClose() {
 
 PUBLIC void websSocketOpen(void)
 {
-    websDefineHandler("websocket", 0, websocketHandler, websocketClose, 0);
+    websDefineHandler("websocket", websocketMatch, websocketHandler, websocketClose, 0);
 }
 
 #if 0
