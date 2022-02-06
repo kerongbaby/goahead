@@ -166,6 +166,17 @@ PUBLIC void wsPing(Webs *wp) {
     wp->state = WEBS_COMPLETE;
 }
 
+PUBLIC void termWebsocket(Webs *wp, int reuse) {
+    if(!(wp->flags & WEBS_SOCKET))
+        return;
+    if(reuse)
+        return;
+    logmsg(2, "termWebsocket");
+    wfree(wp->websocket->path);
+    wfree(wp->websocket->protocol);
+    wfree(wp->websocket);
+}
+
 PUBLIC void checkWebsocketTimeout(Webs *wp) {
     if(!(wp->flags & WEBS_SOCKET))
         return;
@@ -391,8 +402,7 @@ bool parseWebsocketIncoming(Webs *wp) {
     // logmsg(2, "ws_s_payload, opcode: %02X", p->frame.hdr.opcode);
         /* op_close case */
         if (p->frame.hdr.opcode == OP_CLOSE && p->status_code == 0) {
-            logmsg(2, "websockets - onClose");
-            logmsg(2, "websockets - ws_s_payload length: %d", bufLen(wp));
+            p->state = ws_s_start;
             uint64_t index;
             uint32_t mkey;
             int      j1;
@@ -400,33 +410,30 @@ bool parseWebsocketIncoming(Webs *wp) {
             int      m1;
             int      m2;
             char     buf[2];
-            if(bufLen(wp) < 2) {
-            // if (MIN_READ((const char *)(data + len) - &data[i], 2) < 2) {
-                return 0;
-            }
+            if(bufLen(wp) >= 2) {
+                index           = p->content_idx;
+                mkey            = p->frame.masking_key;
 
-            index           = p->content_idx;
-            mkey            = p->frame.masking_key;
+                /* our mod4 for the current index */
+                j1              = index % 4;
+                /* our mod4 for one past the index. */
+                j2              = (index + 1) % 4;
 
-            /* our mod4 for the current index */
-            j1              = index % 4;
-            /* our mod4 for one past the index. */
-            j2              = (index + 1) % 4;
+                /* the masks we will be using to xor the buffers */
+                m1              = (mkey & __MASK[j1]) >> __SHIFT[j1];
+                m2              = (mkey & __MASK[j2]) >> __SHIFT[j2];
+                bufGetBlk(wp, buf, sizeof(buf));
+                buf[0]          = buf[0] ^ m1;
+                buf[1]          = buf[1] ^ m2;
 
-            /* the masks we will be using to xor the buffers */
-            m1              = (mkey & __MASK[j1]) >> __SHIFT[j1];
-            m2              = (mkey & __MASK[j2]) >> __SHIFT[j2];
-            bufGetBlk(wp, buf, sizeof(buf));
-            buf[0]          = buf[0] ^ m1;
-            buf[1]          = buf[1] ^ m2;
-
-            p->status_code  = ntohs(*(uint16_t *)buf);
-            p->content_len -= 2;
-            p->content_idx += 2;
-            /* RFC states that there could be a message after the
+                p->status_code  = ntohs(*(uint16_t *)buf);
+                p->content_len -= 2;
+                p->content_idx += 2;
+                /* RFC states that there could be a message after the
                 * OP_CLOSE 2 byte header, so just drop down and attempt
                 * to parse it.
                 */
+            }
         }
 
 //                bufFlush(&wp->output);
@@ -496,11 +503,14 @@ bool parseWebsocketIncoming(Webs *wp) {
         wp->state = WEBS_COMPLETE;
         return 1;
     } else if(p->frame.hdr.opcode == OP_CLOSE) {
-        logmsg(2, "websockets - CLOSE, state: %d", p->status_code);
-        websDone(wp);
-        wp->flags &= ~WEBS_KEEP_ALIVE;
-        wp->state = WEBS_COMPLETE;
-        // TODO: free websocket instance.
+        wp->path = sclone(p->path);
+        wp->method = sclone("POST");
+        wp->protocol = sclone(p->protocol);
+        wp->state = WEBS_READY;
+        websRouteRequest(wp);
+        p->content_idx = 0;
+        p->state = ws_s_start;
+
         return 1;
     } else if(p->frame.hdr.opcode == OP_TEXT) {
         wp->path = sclone(p->path);
@@ -528,6 +538,15 @@ static bool websocketHandler(Webs *wp) {
     assert(wp->websocket);
     Websocket *p = wp->websocket;
     // logmsg(2, "websocketHandler - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
+    if (p->frame.hdr.opcode == OP_CLOSE) {
+        logmsg(2, "handle onClose, state: %d", wp->websocket->status_code);
+        wp->state = WEBS_BEGIN;
+        websDone(wp);
+        websSetStatus(wp, WEBS_CLOSE);
+        wp->state = WEBS_COMPLETE;
+        return 1;
+    }
+
     WebsBuf *buf = &wp->rxbuf;
     bufAddNull(buf);
     logmsg(2, "%s ", buf->servp);

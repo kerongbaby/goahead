@@ -526,6 +526,7 @@ static void termWebs(Webs *wp, int reuse)
         websFreeUpload(wp);
     }
 #endif
+    termWebsocket(wp, reuse);
 }
 
 
