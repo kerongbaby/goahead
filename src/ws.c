@@ -538,14 +538,28 @@ bool parseWebsocketIncoming(Webs *wp) {
     return 0;
 }
 
+static WebsHash websocketTable = -1;            /* Symbol table for websocket actions */
+
+/*
+    Define a function in the "action" map space
+ */
+PUBLIC int websDefineWebsocketAction(cchar *name, void *fn)
+{
+    assert(name && *name);
+    assert(fn);
+
+    if (fn == NULL) {
+        return -1;
+    }
+    hashEnter(websocketTable, (char*) name, valueSymbol(fn), 0);
+    return 0;
+}
+
 static bool websocketHandler(Webs *wp) {
-    WebsFileInfo    info;
-    char            *tmp, *date;
-    ssize           nchars;
-    int             code;
     assert(websValid(wp));
     assert(wp->method);
     assert(wp->websocket);
+    assert(websocketTable >= 0);
     Websocket *p = wp->websocket;
     // logmsg(2, "websocketHandler - code: %02X, content length: %d", p->frame.hdr.opcode, p->content_len);
     if (p->frame.hdr.opcode == OP_CLOSE) {
@@ -557,6 +571,51 @@ static bool websocketHandler(Webs *wp) {
         return 1;
     }
 
+    WebsKey     *sp;
+    char        actionBuf[ME_GOAHEAD_LIMIT_URI + 1];
+    char        *cp, *actionName;
+    WebsAction  fn;
+    /*
+        Extract the action name
+     */
+    scopy(actionBuf, sizeof(actionBuf), wp->path);
+    if ((actionName = strchr(&actionBuf[1], '/')) == NULL) {
+        logmsg(2, "Missing action name, path: %s", wp->path);
+        return 1;
+    }
+    actionName++;
+    if ((cp = strchr(actionName, '/')) != NULL) {
+        *cp = '\0';
+    }
+
+    /*
+        Lookup the C action function first and then try tcl (no javascript support yet).
+     */
+    sp = hashLookup(websocketTable, actionName);
+    if (sp == NULL) {
+        logmsg(2, "Action %s is not defined", actionName);
+        // TODO: mark websocket error?
+        // websError(wp, HTTP_CODE_NOT_FOUND, "Action %s is not defined", actionName);
+    } else {
+        fn = (WebsAction) sp->content.value.symbol;
+        assert(fn);
+        if (fn) {
+            (*fn)((void*) wp);
+        }
+    }
+
+    return 1;
+}
+
+static void closeWebsocketAction() {
+    logmsg(2, "%s %d", __func__, __LINE__);
+    if (websocketTable != -1) {
+        hashFree(websocketTable);
+        websocketTable = -1;
+    }
+}
+
+static void demoWebsocketAction(Webs *wp) {
     WebsBuf *buf = &wp->rxbuf;
     bufAddNull(buf);
     logmsg(2, "%s ", buf->servp);
@@ -567,18 +626,14 @@ static bool websocketHandler(Webs *wp) {
     websDone(wp);
     // prepare for next message.
     wp->state = WEBS_BEGIN;
-    return 1;
 }
 
-static void websocketClose() {
-    logmsg(2, "%s %d", __func__, __LINE__);
+PUBLIC void websSocketOpen(void) {
+    websocketTable = hashCreate(WEBS_HASH_INIT);
+    websDefineHandler("websocket", websocketMatch, websocketHandler, closeWebsocketAction, 0);
+    // TODO: onOpen, onMessage, onClose, onError
+    websDefineWebsocketAction("demo", demoWebsocketAction);
 }
-
-PUBLIC void websSocketOpen(void)
-{
-    websDefineHandler("websocket", websocketMatch, websocketHandler, websocketClose, 0);
-}
-
 #if 0
 
 ssize_t

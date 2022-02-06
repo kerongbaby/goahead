@@ -5,12 +5,12 @@
 <script type="text/javascript">
     var count = 0;
     function wsOnline() {
-        ws = new WebSocket("ws://" + window.location.host + "/websocket");
+        ws = new WebSocket("ws://" + window.location.host + "/websocket/demo");
         var timer;
         ws.onopen = e => {
             console.log(`WebSocket onopen state: ${ws.readyState}`)
             timer = setInterval(function() {
-                if(count++ >= 50) {
+                if(count++ >= 30) {
                     console.log("Close websocket");
                     count = 0;
                     clearInterval(timer);
