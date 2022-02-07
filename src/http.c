@@ -558,7 +558,7 @@ static void reuseConn(Webs *wp)
         socketReservice(wp->sid);
     }
     termWebs(wp, 1);
-    initWebs(wp, wp->flags & (WEBS_KEEP_ALIVE | WEBS_SECURE | WEBS_HTTP11 | WEBS_SOCKET), 1);
+    initWebs(wp, wp->flags & (WEBS_KEEP_ALIVE | WEBS_SECURE | WEBS_HTTP11), 1);
 }
 
 
@@ -869,7 +869,7 @@ PUBLIC void websPump(Webs *wp)
     for (canProceed = 1; canProceed; ) {
         switch (wp->state) {
         case WEBS_BEGIN:
-            if(!(wp->flags & WEBS_SOCKET))
+            if(NULL == wp->websocket)
                 canProceed = parseIncoming(wp);
             else
                 canProceed = parseWebsocketIncoming(wp);
@@ -1126,8 +1126,6 @@ static void parseHeaders(Webs *wp)
                 wp->flags |= WEBS_KEEP_ALIVE;
             } else if (strcmp(value, "close") == 0) {
                 wp->flags &= ~WEBS_KEEP_ALIVE;
-            } else if (strcmp(value, "upgrade") == 0) {
-                wp->flags |= WEBS_UPGRADE;
             }
 
         } else if (strcmp(key, "content-length") == 0) {
@@ -1199,17 +1197,6 @@ static void parseHeaders(Webs *wp)
                 wp->rxChunkState = WEBS_CHUNK_START;
                 wp->rxRemaining = MAXINT;
             }
-        } else if (strcmp(key, "upgrade") == 0) {
-            wp->flags |= WEBS_SOCKET;
-        } else if (strcmp(key, "sec-websocket-key") == 0) {
-            websSetVar(wp, "sec-websocket-key", value);
-        } else if (strcmp(key, "sec-websocket-extensions") == 0) {
-            websSetVar(wp, "sec-websocket-extensions", value);
-        } else if (strcmp(key, "sec-websocket-version") == 0) {
-            websSetVar(wp, "sec-websocket-version", value);
-        } else if (strcmp(key, "sec-websocket-protocol") == 0) {
-            websSetVar(wp, "sec-websocket-protocol", value);
-            trace(2, "websocket incoming with protocol: %s", value);
         }
     }
     if (!wp->rxChunkState) {
@@ -2414,8 +2401,7 @@ static void checkTimeout(void *arg, int id)
     wp = (Webs*) arg;
     assert(websValid(wp));
 
-    if(!!(wp->flags & WEBS_SOCKET))
-        checkWebsocketTimeout(wp);
+    checkWebsocketTimeout(wp);
 
     elapsed = getTimeSinceMark(wp) * 1000;
     if (websDebug) {

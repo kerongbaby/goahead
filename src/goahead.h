@@ -1846,8 +1846,6 @@ PUBLIC WebsUpload *websLookupUpload(struct Webs *wp, cchar *key);
 #if ME_GOAHEAD_LEGACY
 #define WEBS_LOCAL              0x8000      /**< Request from local system */
 #endif
-#define WEBS_SOCKET             0x10000     /**< Upgrade websocket */
-#define WEBS_UPGRADE            0x20000     /**< Connection Upgrade */
 
 /*
     Incoming chunk encoding states. Used for tx and rx chunking.

@@ -98,7 +98,7 @@ static uint32_t __SHIFT[] = {
 
 #define EVHTP_WS_MAGIC       "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 PUBLIC void debugWebsocket(Webs *wp, const char *func, int line) {
-    if(!(wp->flags & WEBS_SOCKET)) {
+    if(NULL == wp->websocket) {
         // logmsg(2, "wp is not websocket");
         return;
     }
@@ -111,18 +111,33 @@ PUBLIC void debugWebsocket(Webs *wp, const char *func, int line) {
     logmsg(2, "debugWebsocket %p, state: %d", p, p->state);
 }
 
-static bool websocketMatch(Webs *wp) {
-    if (!(wp->flags & WEBS_SOCKET))
-        return 0;
+// HTTP_SEC_WEBSOCKET_EXTENSIONS
 
-    if (!(wp->flags & WEBS_UPGRADE))
+static bool websocketMatch(Webs *wp) {
+    if(NULL != wp->websocket)
         return 1;
 
-    char *key = websGetVar(wp, "sec-websocket-key", NULL); 
-    size_t key_len = strlen(key);
+    char *value;
+    // Upgrade process
+    value = websGetVar(wp, "HTTP_CONNECTION", NULL);
+    slower(value);
+    if (strcmp(value, "upgrade") != 0) {
+        websError(wp, HTTP_CODE_BAD_REQUEST, "Bad Websocket request");
+        return 0;
+    }
+
+    value = websGetVar(wp, "HTTP_UPGRADE", NULL);
+    slower(value);
+    if (strcmp(value, "websocket") != 0) {
+        websError(wp, HTTP_CODE_BAD_REQUEST, "Bad Websocket request");
+        return 0;
+    }
+
+    value = websGetVar(wp, "HTTP_SEC_WEBSOCKET_KEY", NULL); 
+    size_t key_len = strlen(value);
     unsigned char buffer[128];
     memset(buffer, 0x0, sizeof(buffer));
-    strcpy(buffer, key);
+    strcpy(buffer, value);
     strcat(buffer, EVHTP_WS_MAGIC);
 
     unsigned char digest[20];
@@ -137,10 +152,10 @@ static bool websocketMatch(Webs *wp) {
     websWriteHeader(wp, "Sec-WebSocket-Accept", buffer);
     // At this point, if the client supports one of the advertised versions,
     // it can repeat the WebSocket handshake using a new version value.
-    char *value = websGetVar(wp, "sec-websocket-protocol", NULL);
+    value = websGetVar(wp, "HTTP_SEC_WEBSOCKET_VERSION", NULL);
     if(NULL != value) {
-        logmsg(2, "sec-websocket-protocol: %s", value);
-        websWriteHeader(wp, "Sec-WebSocket-Protocol", value);
+        logmsg(2, "HTTP_SEC_WEBSOCKET_VERSION: %s", value);
+        websWriteHeader(wp, "Sec-WebSocket-Version", "13");
     }
     websWriteEndHeaders(wp);
     wp->websocket = walloc(sizeof(*wp->websocket));
@@ -154,7 +169,6 @@ static bool websocketMatch(Webs *wp) {
 
     wp->flags |= WEBS_KEEP_ALIVE;
     wp->state = WEBS_COMPLETE;
-    wp->flags &= ~WEBS_UPGRADE;
     // TODO: onOpen
     return 1;
 }
@@ -177,7 +191,7 @@ PUBLIC void wsPing(Webs *wp) {
 }
 
 PUBLIC void termWebsocket(Webs *wp, int reuse) {
-    if(!(wp->flags & WEBS_SOCKET))
+    if(NULL == wp->websocket)
         return;
     if(reuse)
         return;
@@ -188,12 +202,12 @@ PUBLIC void termWebsocket(Webs *wp, int reuse) {
 }
 
 PUBLIC void checkWebsocketTimeout(Webs *wp) {
-    if(!(wp->flags & WEBS_SOCKET))
+    if(NULL == wp->websocket)
         return;
 
     websNoteRequestActivity(wp);
-    websSetBackgroundWriter(wp, wsPing);
-//    wsPing(wp);
+//    websSetBackgroundWriter(wp, wsPing);
+    wsPing(wp);
 }
 
 static uint64_t ntoh64(const uint64_t input)
